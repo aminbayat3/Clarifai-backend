@@ -1,97 +1,110 @@
 const express = require("express");
 var bcrypt = require("bcryptjs");
 const cors = require("cors");
-const knex = require('knex')({
-  client: 'pg',
-  connection: {
-    host : '127.0.0.1',
-    user : 'postgres',
-    password : '',
-    database : 'facerecognition'
-  }
-})
+const { dbUrl, port } = require("./config");
+const knex = require("knex")({
+  client: "pg",
+  connection: dbUrl,
+  // connection: {
+  //   host : '127.0.0.1',
+  //   user : 'postgres',
+  //   password : 'AmenTest',
+  //   database : 'clarifai'
+  // }
+});
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-const database = {
-  users: [
-    {
-      id: "123",
-      name: "John",
-      email: "john@gmail.com",
-      password: "cookies",
-      entries: 0,
-      joined: new Date(),
-    },
-    {
-      id: "124",
-      name: "Amin",
-      email: "amin@gmail.com",
-      password: "bananas",
-      entries: 0,
-      joined: new Date(),
-    },
-  ],
-};
-
-const { users } = database;
-
-const findAndUpdateUser = (res, id, putRequest) => {
-  let found = false;
-  users.forEach((user) => {
-    if (user.id === id) {
-      found = true;
-      putRequest && user.entries++;
-      return res.json(user);
-    }
-  });
-
-  !found && res.status(400).json("not found");
-};
-
 // app.get("/", (req, res) => {
 //   res.json(users);
 // });
 
-app.post("/signin", (req, res) => {
+app.post("/signin", async (req, res) => {
   const { email, password } = req.body;
-  email === users[0].email && password === users[0].password
-    ? res.json(users[0])
-    : res.status(400).json("error logging in!");
+  try {
+    const response = await knex
+      .select("email", "hash")
+      .from("login")
+      .where("email", "=", email);
+
+    const isValid = bcrypt.compareSync(password, response[0].hash);
+    if(isValid) {
+      try {
+        const [user] = await knex
+        .select('*')
+        .from('users')
+        .where("email", "=", email);
+        res.json(user);
+      } catch(err) {
+        res.status(400).json("unable to get the user");
+      } 
+    } else {
+      res.status(400).json("wrong credentials");
+    }
+  } catch (err) {
+    res.status(400).json("wrong credentials");
+  }
 });
 
-app.post("/signup", (req, res) => {
+app.post("/signup", async (req, res) => {
   const { name, email, password } = req.body;
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
 
-  const newUser = {
-    id: "125",
-    name: name,
-    email: email,
-    password: hash,
-    entries: 0,
-    joined: new Date(),
-  };
-  users.push(newUser);
+  try {
+    await knex.transaction(async (trx) => {
+      await trx
+        .insert({
+          hash: hash,
+          email: email,
+        })
+        .into("login"); // this is another syntax for(knex('users').insert or trx('users').insert)
 
-  res.json(users[users.length - 1]);
+      const response = await trx("users")
+        .insert({
+          name: name,
+          email: email, // entries defaults to zero so we dont have to add it here
+          joined: new Date(),
+        })
+        .returning("*");
+      res.json(response[0]);
+      await trx.commit();
+    }); // we can now use trx object instead of knex to show everything we do is a transaction
+  } catch (err) {
+    await trx.rollback();
+    res.status(400).json("unable to register");
+  }
 });
 
-app.get("/profile/:id", (req, res) => {
+app.get("/profile/:id", async (req, res) => {
   const { id } = req.params;
-
-  findAndUpdateUser(res, id, false);
+  try {
+    const [user] = await knex.select("*").from("users").where({
+      id: id,
+    });
+    user ? res.json(user) : res.status(400).json("not found");
+  } catch (err) {
+    res.status(400).json("error getting user");
+  }
 });
 
-app.put("/image", (req, res) => {
+app.put("/image", async (req, res) => {
   const { id } = req.body;
 
-  findAndUpdateUser(res, id, true);
+  // where({id: id}) we could have done it with object
+  try {
+    const [user] = await knex("users")
+      .where("id", "=", id)
+      .increment("entries", 1)
+      .returning("*"); // returning('entries')
+    user ? res.json(user) : res.status(400).json("not found");
+  } catch (err) {
+    res.status(400).json("error getting user");
+  }
 });
 
-app.listen(3000, () => {
-  console.log("app is running on port 3000");
+app.listen(port, () => {
+  console.log(`app is running on port ${port}`);
 });
